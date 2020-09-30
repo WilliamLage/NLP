@@ -1,0 +1,189 @@
+---
+title: "Trump 2020"
+author: "William Lage"
+date: "9/30/2020"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rvest)
+library(dplyr)
+```
+
+#pulling data from a user on twitter and making it a dataframe
+```{r connect to Twitter}
+# install.packages("twitteR")
+library(twitteR)
+
+consumer_key <- "<your consumer key>"
+consumer_secret <- "<your secret key>"
+access_token <- "<your access token>"
+access_secret <- "<your secret access>"
+setup_twitter_oauth(consumer_key, consumer_secret, access_token, access_secret)
+
+```
+
+```{r pulling trumps data}
+trump_tweets <- userTimeline("realDonaldTrump", n = 3200)
+trump_tweets_df <- trump_tweets %>%
+  strip_retweets %>%
+  twListToDF()
+```
+
+# analyzing the data
+```{r}
+library(tidyverse)
+library(lubridate) #Package for working with time data
+library(scales) 
+library(ggplot2)
+library(NLP) #Natural Language Processing Infrastructure
+library(tm) #Text minig package
+library(SnowballC) #Text preprocessing package
+```
+
+```{r}
+#make our dataframe a corpus
+trumptweets <- trump_tweets_df %>%
+  select(text) %>%
+  VectorSource() %>%
+  VCorpus
+
+#stem and clean our strings
+trump2 <- trumptweets %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(tolower) %>%
+  tm_map(function(x)removeWords(x, stopwords())) %>%
+  tm_map(removeWords, c("the", "will", stopwords("english"))) %>%
+  tm_map(stripWhitespace) %>%
+  tm_map(stemDocument) %>%
+  tm_map(PlainTextDocument)
+```
+
+```{r}
+#### Create Word Cloud #### 
+library(RColorBrewer)
+library(wordcloud)
+library(SnowballC)
+library(Matrix)
+
+##Create a matrix with words and frequency
+trumpdocmatrix1 <- TermDocumentMatrix(trump2, control = list(wordLengths = c(1, Inf)))
+m <- as.matrix(trumpdocmatrix1)
+v <- sort(rowSums(m),decreasing=TRUE)
+wordfreq <- data.frame(word = names(v),freq=v)
+head(wordfreq)
+wordfreq <- wordfreq[-1,]
+
+## Set color
+library(RColorBrewer)
+pal <- brewer.pal(8,"Dark2")
+pal <- pal[-(1:2)]
+
+## Create Wordcloud
+library(wordcloud)
+wordcloud(wordfreq$word,wordfreq$freq, scale=c(4,.5),
+          min.freq=10,max.words=100, random.order=T, rot.per=.15, 
+          colors=pal)
+```
+
+```{r topic modeling}
+trumpdocmatrix2 <- as.DocumentTermMatrix(trumpdocmatrix1)
+library(topicmodels)
+lda <- LDA(trumpdocmatrix2, k = 6) # find 6 topics
+#inspect the top 10 word for each topics
+(term <- terms(lda, 10))
+##Extract Number of topics
+topic <- topics(lda, 1)
+##merge topic modeling to the main file 
+trump_tweets_df$topics <- topic
+table(trump_tweets_df$topics)
+```
+#text mining
+```{r}
+library(tidytext)
+library(stringr)
+reg <- "([^A-Za-z\\d#@']|'(?![A-Za-z\\d#@]))"
+tweet_words <- trump_tweets_df %>%
+  filter(!str_detect(text, '^"')) %>%
+  mutate(text = str_replace_all(text, "https://t.co/[A-Za-z\\d]+|&amp;", "")) %>%
+  unnest_tokens(word, text, token = "regex", pattern = reg) %>%
+  filter(!word %in% stop_words$word,
+         str_detect(word, "[a-z]"))
+head(tweet_words)
+```
+
+```{r}
+#won't work until we get more entries
+
+library(widyr)
+## Look at the word association, or how this word shows up in the same tweet.
+
+## Getting count number
+word_pairs <- tweet_words %>%
+        pairwise_count(word, id, sort = TRUE)
+
+## Getting Phi correlation
+word_cor <- tweet_words %>%
+   group_by(word) %>%
+   filter(n() >= 4) %>%
+   pairwise_cor(word, id) %>%
+   filter(!is.na(correlation))
+
+
+# Filter some small correlation
+word_cor <- word_cor %>%
+  mutate(correlation_abs = abs(correlation)) %>%
+  filter(correlation_abs > 0.1)
+
+library(igraph)
+library(ggraph)
+
+word_cor %>% 
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+  geom_node_point(color = "red1", size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+
+```
+
+#sentiment analysis
+```{r}
+#Get a dictionary for sentiments
+library(tidytext)
+library(remotes)
+
+nrc=get_sentiments("nrc") #nrc, bing, loughran
+nrc
+```
+```{r}
+#Sentiment analysis
+sources <- tweet_words %>%
+  group_by(statusSource) %>%
+  mutate(total_words = n()) %>%
+  ungroup() %>%
+  distinct(id, statusSource, total_words)
+
+#Sentiment by words
+tidysentiment <- tweet_words %>%
+  inner_join(nrc, by = "word") %>%
+  count(sentiment, id, created, statusSource, word) %>%
+  ungroup()
+
+
+library(scales)
+tidysentiment %>%
+  count(sentiment, hour = hour(with_tz(created, "EST"))) %>%
+  mutate(counts = n ) %>%
+  ggplot(aes(hour, counts, color = sentiment)) +
+  geom_line() +
+  labs(x = "Hour of day (EST)",
+       y = "intensity of emotion",
+       color = "")
+```
